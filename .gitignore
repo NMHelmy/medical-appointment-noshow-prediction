@@ -1,0 +1,8 @@
+venv/
+data/chunks/
+__pycache__/
+*.pyc
+*.pyo
+.idea/
+.vscode/
+*.egg-info/
