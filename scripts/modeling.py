@@ -1,15 +1,12 @@
 # Nour Helmy - 202202012
 # Train three classifiers on the processed no-show dataset using PySpark MLlib
+# Logistic Regression, Random Forest, and Gradient Boosted Trees (GBT)
 
 import os
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.ml.feature import VectorAssembler, StandardScaler
-from pyspark.ml.classification import (
-    LogisticRegression,
-    RandomForestClassifier,
-    GBTClassifier
-)
+from pyspark.ml.classification import (LogisticRegression, RandomForestClassifier, GBTClassifier)
 
 # Must be set before Spark initializes so its Hadoop client authenticates as the correct user
 os.environ["HADOOP_USER_NAME"] = "hadoop"
@@ -26,7 +23,6 @@ FEATURE_COLS = [
     "WaitDays", "GenderEncoded", "AppointmentWeekday"
 ]
 
-
 def create_spark_session():
     spark = SparkSession.builder \
         .appName("NoShow_Modeling") \
@@ -37,50 +33,41 @@ def create_spark_session():
     spark.sparkContext.setLogLevel("ERROR")
     return spark
 
-
 def load_data(spark):
     path = f"{SPARK_HDFS}{PROCESSED_PATH}"
     df = spark.read.parquet(path)
     print(f"Loaded {df.count():,} rows from {path}")
     return df
 
-
 def add_class_weights(df):
     # Dataset is ~80% label=0 (showed up) and ~20% label=1 (no-show)
     # Class weights penalize misclassifying the minority class more heavily during training
     total  = df.count()
-    counts = {r["label"]: r["count"] for r in df.groupBy("label").count().collect()}
+    counts = {r["label"]: r["count"] for r in df.groupBy("label").count().collect()}    
     w0 = total / (2 * counts[0])
     w1 = total / (2 * counts[1])
     print(f"Class counts — label=0: {counts[0]:,}  label=1: {counts[1]:,}")
     print(f"Class weights — w0: {w0:.4f}  w1: {w1:.4f}")
-    return df.withColumn("classWeight",
-               F.when(F.col("label") == 1, w1).otherwise(w0))
-
+    return df.withColumn("classWeight", F.when(F.col("label") == 1, w1).otherwise(w0))
 
 def assemble_features(df):
     # VectorAssembler merges individual feature columns into a single dense vector for MLlib
     assembler = VectorAssembler(inputCols=FEATURE_COLS, outputCol="features")
     return assembler.transform(df).drop("AppointmentID", "checksum")
 
-
 def scale_features(train_df, test_df):
-    # Scaler is fit on training data only to prevent test statistics from leaking into training
-    # withMean=False avoids converting sparse vectors to dense; withStd=True normalizes variance
-    # Logistic Regression needs scaled features to converge correctly; RF and GBT do not
-    scaler       = StandardScaler(inputCol="features", outputCol="scaledFeatures",
-                                  withMean=False, withStd=True)
+    # Logistic Regression is sensitive to the size of numbers - Random Forest and GBT dont need this
+    # (e.g. Age ranges from 0 to 100, while Scholarship is binary 0/1), so we standardize them
+    # Scaling normalizes everything to the same range so no column dominates unfairly.
+    scaler = StandardScaler(inputCol="features", outputCol="scaledFeatures", withMean=False, withStd=True)
     scaler_model = scaler.fit(train_df)
     return scaler_model.transform(train_df), scaler_model.transform(test_df)
 
-
 def print_feature_importances(model, label):
-    importances = sorted(zip(FEATURE_COLS, model.featureImportances.toArray()),
-                         key=lambda x: x[1], reverse=True)
+    importances = sorted(zip(FEATURE_COLS, model.featureImportances.toArray()), key=lambda x: x[1], reverse=True)
     print(f"  Feature importances ({label}):")
     for name, score in importances:
         print(f"    {name:<22} {score:.4f}")
-
 
 def save_predictions(predictions, folder_name):
     path = f"{SPARK_HDFS}{PREDICTIONS_DIR}/{folder_name}"
@@ -89,8 +76,11 @@ def save_predictions(predictions, folder_name):
         .coalesce(1).write.mode("overwrite").parquet(path)
     print(f"  Predictions saved → {path}")
 
-
 def train_logistic_regression(train_scaled, test_scaled):
+    # The model starts with a random guess, then repeats this loop up to 100 times:
+    # 1) Make predictions on the training data using current coefficients
+    # 2) Compare predictions to actual labels to compute the error
+    # 3) Adjust coefficients slightly to reduce the error (gradient descent)
     print("\n[1/3] Logistic Regression")
     lr = LogisticRegression(
         featuresCol="scaledFeatures",
@@ -109,6 +99,7 @@ def train_logistic_regression(train_scaled, test_scaled):
 
 
 def train_random_forest(train_df, test_df):
+    # It builds 100 decision trees independently, each one trained on a slightly different random sample of the data
     print("\n[2/3] Random Forest")
     rf = RandomForestClassifier(
         featuresCol="features",
@@ -125,8 +116,8 @@ def train_random_forest(train_df, test_df):
     print_feature_importances(model, "Random Forest")
     return model
 
-
 def train_gbt(train_df, test_df):
+    # Unlike RF which builds trees independently, GBT builds them one after another, each fixing the previous one's mistakes
     print("\n[3/3] Gradient Boosted Trees")
     # GBTClassifier does not support weightCol in PySpark MLlib
     # The 80/20 imbalance is moderate enough that GBT still learns a useful boundary
@@ -143,7 +134,6 @@ def train_gbt(train_df, test_df):
     save_predictions(preds, "gbt_predictions")
     print_feature_importances(model, "GBT")
     return model
-
 
 def main():
     spark = create_spark_session()

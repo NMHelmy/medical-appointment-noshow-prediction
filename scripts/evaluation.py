@@ -21,7 +21,6 @@ MODELS = {
     "GBT":                 "gbt_predictions"
 }
 
-
 def create_spark_session():
     spark = SparkSession.builder \
         .appName("NoShow_Evaluation") \
@@ -65,7 +64,6 @@ def compute_metrics(predictions):
         "Accuracy":  accuracy,
     }
 
-
 def print_confusion_matrix(predictions, model_name):
     # Collect the 2×2 cell counts from HDFS into a local dict for display
     cm = {
@@ -79,7 +77,6 @@ def print_confusion_matrix(predictions, model_name):
         c0 = cm.get((actual, 0), 0)
         c1 = cm.get((actual, 1), 0)
         print(f"  {label_str}  {c0:>10,}        {c1:>10,}")
-
 
 def print_comparison_table(results):
     metrics = ["AUC-ROC", "AUC-PR", "F1", "Precision", "Recall", "Accuracy"]
@@ -97,7 +94,6 @@ def print_comparison_table(results):
         print(row)
     print(sep)
 
-
 def select_best_model(results):
     # Primary criterion: AUC-ROC — threshold-independent and robust under class imbalance
     best  = max(results, key=lambda name: results[name]["AUC-ROC"])
@@ -113,7 +109,6 @@ def select_best_model(results):
     print("Justification: highest AUC-ROC means it best ranks no-show patients above "
           "show-up patients across all decision thresholds, making it the most reliable "
           "model for downstream triage or reminder systems.")
-
 
 def main():
     spark = create_spark_session()
@@ -146,7 +141,6 @@ def main():
     select_best_model(results)
 
     spark.stop()
-
 
 if __name__ == "__main__":
     main()
