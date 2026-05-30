@@ -7,17 +7,12 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import StringType
 from hdfs import InsecureClient
+from config import HDFS_URL, HDFS_USER, SPARK_HDFS, HDFS_INPUT, HDFS_OUTPUT, PROCESSED_DIR, HASH_STORE
 
-HDFS_URL      = "http://172.20.136.16:9870"
-HDFS_USER     = "hadoop"
-HDFS_INPUT    = "/noshow/input"
-HDFS_OUTPUT   = "/noshow/output"
-PROCESSED_DIR = "/noshow/output/processed"
-SPARK_HDFS    = "hdfs://172.20.136.16:9000"
 STREAM_DELAY  = 1 # Seconds to wait between processing each chunk to simulate real-time streaming
 
 # Must be set before Spark initializes so its Hadoop client authenticates as the correct user
-os.environ["HADOOP_USER_NAME"] = "hadoop"
+os.environ["HADOOP_USER_NAME"] = HDFS_USER
 
 client = InsecureClient(HDFS_URL, user=HDFS_USER)
 
@@ -33,22 +28,30 @@ def create_spark_session():
     spark.sparkContext.setLogLevel("ERROR")
     return spark
 
-# Concatenate 5 key fields with | separator then hash the result into an MD5 fingerprint
-# This fingerprint uniquely identifies each row and is used to detect duplicates
-def compute_checksum(df):
-    df = df.withColumn(
-        "checksum",
-        F.md5(
-            F.concat_ws("|",
-                F.col("AppointmentID").cast(StringType()),
-                F.col("PatientId").cast(StringType()),
-                F.col("ScheduledDay"),
-                F.col("AppointmentDay"),
-                F.col("No-show")
-            )
-        )
-    )
-    return df
+# Concatenate ALL column values with | separator and hash into a single MD5 fingerprint.
+# Using all columns ensures any change to any field produces a different hash.
+def compute_row_hash(df):
+    all_cols = [F.col(c).cast(StringType()) for c in df.columns]
+    return df.withColumn("row_hash", F.md5(F.concat_ws("|", *all_cols)))
+
+# Load the hash set saved from the previous run off HDFS.
+# Returns an empty DataFrame (same schema) on first run when no hash store exists yet.
+def load_previous_hashes(spark):
+    hash_path = f"{SPARK_HDFS}{HASH_STORE}"
+    try:
+        return spark.read.parquet(hash_path).select("row_hash")
+    except Exception:
+        return spark.createDataFrame([], "row_hash STRING")
+
+# Keep only rows whose hash is absent from old_hashes_df — these are new or modified records.
+def filter_new_or_modified(df, old_hashes_df):
+    return df.join(old_hashes_df, on="row_hash", how="left_anti")
+
+# Persist the full set of row hashes from this run to HDFS so the next run can compare against them.
+def save_hashes(hashes_df):
+    hash_path = f"{SPARK_HDFS}{HASH_STORE}"
+    hashes_df.coalesce(1).write.mode("overwrite").parquet(hash_path)
+    print(f"Saved {hashes_df.count():,} row hashes to HDFS for next-run comparison")
 
 # Count total rows vs rows with distinct AppointmentIDs to find duplicates
 def detect_duplicates(df, chunk_name):
@@ -58,7 +61,7 @@ def detect_duplicates(df, chunk_name):
     if dupes > 0:
         print(f"[{chunk_name}] Found {dupes} duplicate AppointmentIDs - removing")
     else:
-        print(f"[{chunk_name}] No duplicates found (checksum verified)")
+        print(f"[{chunk_name}] No duplicates found")
     # Remove duplicate rows keeping only the first occurrence of each AppointmentID
     return df.dropDuplicates(["AppointmentID"])
 
@@ -96,9 +99,6 @@ def etl_transform(df, chunk_name):
     df = df.withColumn("AppointmentWeekday",
             F.dayofweek(F.col("AppointmentDay")))
 
-    # Add MD5 fingerprint column to each row for integrity verification
-    df = compute_checksum(df)
-
     # Find and remove any duplicate appointments using AppointmentID
     df = detect_duplicates(df, chunk_name)
 
@@ -117,9 +117,19 @@ def run_fake_streaming(spark):
         print("No chunks found in HDFS. Run hdfs_upload.py first.")
         return
 
+    # Load hashes from the previous run — empty on first run
+    old_hashes_df = load_previous_hashes(spark)
+    is_first_run = old_hashes_df.count() == 0
+    if is_first_run:
+        print("No previous hash store found - treating all rows as new (first run)")
+    else:
+        print(f"Loaded {old_hashes_df.count():,} hashes from previous run for change detection")
+
     print(f"\nStarting fake streaming — {len(chunks)} chunks to process\n")
     # List to collect all processed chunk DataFrames for final merging
     all_processed = []
+    # Accumulate raw row hashes from every chunk to persist after the run
+    all_raw_hashes = []
 
     for idx, chunk_file in enumerate(chunks):
         # Build full hdfs:// path that Spark needs to read the file from HDFS
@@ -130,10 +140,25 @@ def run_fake_streaming(spark):
         # Extract - Reading the raw data
         # Spark reads the chunk CSV directly from HDFS into a distributed DataFrame
         df = spark.read.csv(chunk_path, header=True, inferSchema=True)
-        print(f"Raw rows read: {df.count():,}")
+        total_rows = df.count()
+        print(f"Raw rows read: {total_rows:,}")
+
+        # Hash every raw row using all columns before any transformation
+        df = compute_row_hash(df)
+        all_raw_hashes.append(df.select("row_hash"))
+
+        # Keep only rows that are new or modified compared to the previous run
+        df = filter_new_or_modified(df, old_hashes_df)
+        new_count = df.count()
+        print(f"New/modified rows to process: {new_count:,} / {total_rows:,}")
+
+        if new_count == 0:
+            print(f"  No new records in {chunk_file} — skipping ETL")
+            time.sleep(STREAM_DELAY)
+            continue
 
         # Transform - Cleaning and reshaping the data
-        # Run all 9 ETL cleaning and transformation steps on this chunk
+        # Run ETL cleaning and transformation steps on new/modified rows only
         df_clean = etl_transform(df, chunk_file)
 
         # Load - Saving the cleaned data to its destination
@@ -147,7 +172,18 @@ def run_fake_streaming(spark):
         # Wait before processing next chunk to simulate real-time data arrival
         time.sleep(STREAM_DELAY)
 
-    # Stack all 11 processed chunk DataFrames into one single DataFrame
+    # Persist all row hashes from this run so the next run can detect changes
+    if all_raw_hashes:
+        combined_hashes = all_raw_hashes[0]
+        for h in all_raw_hashes[1:]:
+            combined_hashes = combined_hashes.union(h)
+        save_hashes(combined_hashes)
+
+    if not all_processed:
+        print("No new or modified records found across all chunks — pipeline complete.")
+        return None
+
+    # Stack all processed chunk DataFrames into one single DataFrame
     final_df = all_processed[0]
     for df in all_processed[1:]:
         final_df = final_df.union(df)
@@ -161,9 +197,9 @@ def run_fake_streaming(spark):
     # Show how many patients showed up (0) vs did not show up (1)
     final_df.groupBy("label").count().orderBy("label").show()
 
-    # Build final output path and save merged dataset as a single Parquet file to HDFS
+    # Append new/modified rows to final_processed so modeling always trains on the full history
     final_output = f"{SPARK_HDFS}{HDFS_OUTPUT}/final_processed"
-    final_df.coalesce(1).write.mode("overwrite").parquet(final_output)
+    final_df.coalesce(1).write.mode("append").parquet(final_output)
 
     return final_df
 
