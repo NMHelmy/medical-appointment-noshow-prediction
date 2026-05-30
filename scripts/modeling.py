@@ -7,14 +7,12 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.ml.feature import VectorAssembler, StandardScaler
 from pyspark.ml.classification import (LogisticRegression, RandomForestClassifier, GBTClassifier)
+from config import HDFS_USER, SPARK_HDFS, HDFS_OUTPUT, MODELS_DIR, PREDICTIONS_DIR
 
 # Must be set before Spark initializes so its Hadoop client authenticates as the correct user
-os.environ["HADOOP_USER_NAME"] = "hadoop"
+os.environ["HADOOP_USER_NAME"] = HDFS_USER
 
-SPARK_HDFS      = "hdfs://172.20.136.16:9000"
 PROCESSED_PATH  = "/noshow/output/final_processed"
-MODELS_DIR      = "/noshow/models"
-PREDICTIONS_DIR = "/noshow/predictions"
 
 # AppointmentID is an identifier, checksum is an MD5 hash — both are excluded
 FEATURE_COLS = [
@@ -22,7 +20,6 @@ FEATURE_COLS = [
     "Alcoholism", "Handcap", "SMS_received",
     "WaitDays", "GenderEncoded", "AppointmentWeekday"
 ]
-
 def create_spark_session():
     spark = SparkSession.builder \
         .appName("NoShow_Modeling") \
@@ -32,7 +29,6 @@ def create_spark_session():
         .getOrCreate()
     spark.sparkContext.setLogLevel("ERROR")
     return spark
-
 def load_data(spark):
     path = f"{SPARK_HDFS}{PROCESSED_PATH}"
     df = spark.read.parquet(path)
@@ -96,7 +92,6 @@ def train_logistic_regression(train_scaled, test_scaled):
     save_predictions(preds, "lr_predictions")
     print(f"  Intercept: {model.intercept:.4f}")
     return model
-
 
 def train_random_forest(train_df, test_df):
     # It builds 100 decision trees independently, each one trained on a slightly different random sample of the data
@@ -165,7 +160,6 @@ def main():
 
     spark.stop()
     print("\nModeling complete. Run evaluation.py to compare results.")
-
 
 if __name__ == "__main__":
     main()

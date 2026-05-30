@@ -3,10 +3,8 @@
 
 import pandas as pd
 import os
+from config import RAW_FILE, CHUNKS_DIR
 
-# Config
-RAW_FILE    = "../data/raw/appointments.csv"
-CHUNKS_DIR  = "../data/chunks"
 CHUNK_SIZE  = 10_000   # rows per chunk -> 11 chunks from 110,527 rows
 
 def split_into_chunks():

@@ -3,15 +3,9 @@
 
 import os
 from hdfs import InsecureClient
+from config import HDFS_URL, HDFS_USER, CHUNKS_DIR, HDFS_INPUT, HDFS_OUTPUT
 
-# Config
-HDFS_URL    = "http://localhost:9870"
-HDFS_USER   = "hadoop"
-
-CHUNKS_DIR  = "../data/chunks"
-HDFS_INPUT  = "/noshow/input"
 HDFS_STREAM = "/noshow/streaming_input"
-HDFS_OUTPUT = "/noshow/output"
 
 # Connect to real HDFS
 client = InsecureClient(HDFS_URL, user=HDFS_USER)

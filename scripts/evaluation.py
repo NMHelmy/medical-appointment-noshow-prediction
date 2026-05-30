@@ -7,12 +7,10 @@ from pyspark.ml.evaluation import (
     BinaryClassificationEvaluator,
     MulticlassClassificationEvaluator
 )
+from config import HDFS_USER, SPARK_HDFS, PREDICTIONS_DIR
 
 # Must be set before Spark initializes so its Hadoop client authenticates as the correct user
-os.environ["HADOOP_USER_NAME"] = "hadoop"
-
-SPARK_HDFS      = "hdfs://172.20.136.16:9000"
-PREDICTIONS_DIR = "/noshow/predictions"
+os.environ["HADOOP_USER_NAME"] = HDFS_USER
 
 # Ordered by complexity: baseline → ensemble → boosted
 MODELS = {
@@ -30,8 +28,6 @@ def create_spark_session():
         .getOrCreate()
     spark.sparkContext.setLogLevel("ERROR")
     return spark
-
-
 def compute_metrics(predictions):
     # AUC-ROC: threshold-independent ranking quality; handles class imbalance better than accuracy
     auc_roc = BinaryClassificationEvaluator(
