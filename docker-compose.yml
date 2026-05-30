@@ -1,0 +1,65 @@
+services:
+
+  namenode:
+    image: apache/hadoop:3.3.6
+    hostname: namenode
+    container_name: namenode
+    command: ["hdfs", "namenode"]
+    environment:
+      ENSURE_NAMENODE_DIR: "/tmp/hadoop-root/dfs/name"
+    env_file:
+      - docker/hadoop.env
+    ports:
+      - "9870:9870"   # HDFS web UI
+      - "9000:9000"   # HDFS RPC port (Spark connects here)
+    volumes:
+      - namenode_data:/tmp/hadoop-root/dfs/name
+    networks:
+      - hadoop_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870"]
+      interval: 10s
+      retries: 10
+
+  datanode:
+    image: apache/hadoop:3.3.6
+    hostname: datanode
+    container_name: datanode
+    command: ["hdfs", "datanode"]
+    env_file:
+      - docker/hadoop.env
+    ports:
+      - "9864:9864"   # DataNode web UI
+    volumes:
+      - datanode_data:/tmp/hadoop-root/dfs/data
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - hadoop_net
+
+  pipeline:
+    build: .
+    container_name: pipeline
+    environment:
+      HDFS_HOST: namenode
+      HADOOP_USER_NAME: hadoop
+      DATA_DIR: /app/data
+    volumes:
+      - ./data:/app/data        # raw CSV and chunks read/written here
+      - ./scripts:/app/scripts  # scripts mounted so edits reflect without rebuild
+    depends_on:
+      namenode:
+        condition: service_healthy
+      datanode:
+        condition: service_started
+    networks:
+      - hadoop_net
+
+volumes:
+  namenode_data:
+  datanode_data:
+
+networks:
+  hadoop_net:
+    driver: bridge
